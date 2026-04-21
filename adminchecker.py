@@ -3,11 +3,12 @@ import time
 import os
 from datetime import datetime, timezone
 from dotenv import load_dotenv
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv()
 
 WEBHOOK_URL    = os.getenv("WEBHOOK_URL", "")
-CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "10"))
+CHECK_INTERVAL = int(os.getenv("CHECK_INTERVAL", "1"))
 MESSAGE_ID     = None
 
 HEADERS = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
@@ -32,10 +33,10 @@ def fetch_user(username):
             headers=HEADERS, timeout=10
         )
         if r.status_code == 200:
-            return r.json()
+            return username, r.json()
     except Exception as e:
         print(f"[ERR] {username}: {e}")
-    return None
+    return username, None
 
 def get_status_label(status):
     s = (status or "").lower()
@@ -130,12 +131,10 @@ def build_embed(results):
     desc += "──────────────────────────────────\n"
     desc += ("\n".join(online_lines) if online_lines else "*No staff currently online.*")
     desc += "\n\n"
-
     desc += f"🟠 **Idle** — {idle_count} recently active\n"
     desc += "──────────────────────────────────\n"
     desc += ("\n".join(idle_lines) if idle_lines else "*No staff idle.*")
     desc += "\n\n"
-
     desc += f"🔴 **Offline** — {offline_count} inactive\n"
     desc += "──────────────────────────────────\n"
     desc += ("\n".join(offline_lines) if offline_lines else "*All staff are online!*")
@@ -194,15 +193,17 @@ def main():
     while True:
         print(f"\n[{datetime.now().strftime('%H:%M:%S')}] Checking...")
 
-        results = []
-        for admin in ADMINS:
-            data = fetch_user(admin["username"])
-            results.append({
-                "username": admin["username"],
-                "data":     data,
-            })
-            print(f"  → {admin['username']}: {'✅' if data else '❌'}")
-            time.sleep(0.3)
+        # Fetch all users concurrently
+        results_map = {}
+        with ThreadPoolExecutor(max_workers=8) as executor:
+            futures = {executor.submit(fetch_user, a["username"]): a["username"] for a in ADMINS}
+            for future in as_completed(futures):
+                username, data = future.result()
+                results_map[username] = data
+                print(f"  → {username}: {'✅' if data else '❌'}")
+
+        # Preserve original order
+        results = [{"username": a["username"], "data": results_map.get(a["username"])} for a in ADMINS]
 
         send_or_edit_webhook(build_embed(results))
         print(f"[OK] Next check in {CHECK_INTERVAL}s...")
